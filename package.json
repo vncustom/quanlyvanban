@@ -1,0 +1,35 @@
+{
+  "name": "quanlyvanban",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev:web": "vite",
+    "build": "vite build",
+    "dev": "npm run build && wrangler dev",
+    "deploy:proxy": "wrangler deploy -c workers/gemini-proxy/wrangler.toml",
+    "deploy": "npm run build && npm run deploy:proxy && wrangler deploy",
+    "db:migrate:local": "wrangler d1 migrations apply quanlyvanban --local",
+    "db:migrate:remote": "wrangler d1 migrations apply quanlyvanban --remote",
+    "seed": "node scripts/gen-seed.mjs",
+    "seed:local": "wrangler d1 execute quanlyvanban --local --file=seed_users.sql",
+    "seed:remote": "wrangler d1 execute quanlyvanban --remote --file=seed_users.sql",
+    "oauth": "node scripts/get-refresh-token.mjs"
+  },
+  "dependencies": {
+    "docx-preview": "^0.4.1",
+    "hono": "^4.6.0",
+    "jszip": "^3.10.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261110.1",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "typescript": "^5.6.0",
+    "vite": "^5.4.0",
+    "wrangler": "^4.0.0"
+  }
+}

@@ -1,0 +1,8 @@
+name = "gemini-proxy"
+main = "index.ts"
+compatibility_date = "2025-01-01"
+workers_dev = false
+preview_urls = false
+
+[placement]
+hostname = "generativelanguage.googleapis.com"
