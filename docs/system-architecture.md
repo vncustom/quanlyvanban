@@ -115,13 +115,30 @@ Nếu Drive lỗi thì **chưa ghi** vào DB (không có bản ghi "mồ côi").
 2. `POST /api/extract` (quyền ghi): dựng `contents` = prompt + (file `inline_data` | text), yêu cầu `responseMimeType: application/json` kèm `responseSchema` (`trich_yeu`, `tom_tat`, `don_vi_soan_thao`, `so_van_ban`).
 3. Gọi Gemini **qua service binding `GEMINI`** tới `gemini-proxy`; khi chạy local (không có binding) gọi thẳng.
 4. Server cắt cứng số từ (`trich_yeu` ≤ 20, `tom_tat` ≤ 100) và trả JSON; form chỉ ghi đè ô khi AI có kết quả, người dùng kiểm tra rồi mới lưu.
-Prompt và tên model nằm trong `src/worker/index.ts` (`EXTRACT_PROMPT`, `GEMINI_MODEL`).
+Prompt và tên model nằm trong `src/worker/ai.ts` (`EXTRACT_PROMPT`, `GEMINI_MODEL`); hàm `extractWithAi` dùng chung cho nút AI và upload tự động.
 
 ### 4.6 Admin đổi Hướng/Loại
 `PUT /api/docs/:id` với `huong`/`loai` khác bản cũ: chỉ admin → `ensureFolder` thư mục đích → `moveFile` (Drive `addParents`/`removeParents`) → mới `UPDATE` DB. Chuyển file lỗi thì DB không đổi.
 
 ### 4.7 Đổi folder gốc Drive
 Admin lưu link/ID mới → ghi `settings` và **xóa cache `drive_folders`** của hướng đó. Văn bản cũ vẫn trỏ đúng file theo `drive_file_id` (không phụ thuộc folder); chỉ văn bản upload sau mới vào folder mới.
+
+### 4.8 Upload tự động từ folder Drive dùng chung
+Admin bật ở tab **Upload tự động** (folder nguồn lưu ở `settings.import_folder`). Cron Trigger `* * * * *` gọi `scheduled()` → `runImportTick` (`src/worker/import.ts`):
+```
+mỗi phút: đọc settings → (tắt / chưa đủ giãn cách import_interval phút → thoát)
+        → khóa import_lock (UPDATE có điều kiện, chống 2 lượt chồng nhau)
+        → pickFile: liệt kê folder nguồn (cũ nhất trước), bỏ file đã lỗi ≥ 2 lần hoặc đang nghỉ 15 phút chờ thử lại
+        → importOne (tối đa 1 file/lượt):
+            kiểm tra đuôi/kích thước → tải file → AI trích xuất (docx/xlsx đọc chữ ngay trên Worker, src/worker/zip.ts)
+            → ensureFolder("den", loại) → relocateFile (moveFile giữ nguyên ID; không có quyền thì chép + xóa bản gốc)
+            → INSERT documents (huong='den', ngay_nhan=hôm nay, created_by=admin lưu cấu hình) → audit_log("auto_import")
+        → lỗi ở khâu nào: ghi import_errors (file, khâu, nội dung, số lần); đủ 2 lần thì ngừng, chờ admin "Thử lại"
+```
+- **Rate limit:** mỗi lượt chỉ 1 file, giãn cách tối thiểu `import_interval` phút (mặc định 1) nên số lần gọi Gemini/Drive bị chặn trên.
+- **File lỗi không bị mất:** vẫn nằm trong folder nguồn; chỉ file thành công mới rời folder nguồn.
+- Trường AI không đọc được: loại → "Khác", đơn vị → "Chưa xác định", trích yếu → tên file; có ghi chú trong `ghi_chu` để người kiểm tra biết. Văn bản tự động **không** được đánh dấu đã đọc cho admin.
+- Hỗ trợ: PDF, ảnh, .txt, .docx, .xlsx. Không hỗ trợ trích xuất: .doc, .xls, .ppt, .pptx, Google Docs/Sheets (báo lỗi khâu "Kiểm tra file"/"Trích xuất bằng AI").
 
 ## 5. Bảo mật
 

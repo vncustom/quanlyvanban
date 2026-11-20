@@ -90,10 +90,48 @@ export async function moveFile(env: Env, fileId: string, newFolderId: string) {
   if (!r.ok) throw new Error("Không chuyển được file sang folder mới: " + (await r.text()));
 }
 
+export type DriveItem = { id: string; name: string; mimeType: string; size?: string; createdTime: string };
+
+/** Liệt kê file (không gồm thư mục con, thùng rác) trong folder, cũ nhất trước. */
+export async function listFolderFiles(env: Env, folderId: string, pageToken?: string) {
+  const q = `'${folderId}' in parents and trashed = false and mimeType != 'application/vnd.google-apps.folder'`;
+  const p = new URLSearchParams({
+    q, orderBy: "createdTime,name", pageSize: "100", supportsAllDrives: "true", includeItemsFromAllDrives: "true",
+    fields: "nextPageToken,files(id,name,mimeType,size,createdTime)",
+  });
+  if (pageToken) p.set("pageToken", pageToken);
+  const r = await gfetch(env, `${API}/files?${p}`);
+  const j: any = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error("Không đọc được folder nguồn trên Drive: " + (j?.error?.message || r.status));
+  return { files: (j.files ?? []) as DriveItem[], next: (j.nextPageToken as string | undefined) };
+}
+
+/**
+ * Đưa file từ folder nguồn sang folder đích và trả về ID file cuối cùng.
+ * Ưu tiên chuyển (giữ nguyên ID); nếu không có quyền chuyển (file của người khác) thì chép sang bản mới rồi xóa bản cũ.
+ */
+export async function relocateFile(env: Env, fileId: string, toFolder: string, name: string, mime: string, data: ArrayBuffer) {
+  try {
+    await moveFile(env, fileId, toFolder);
+    return fileId;
+  } catch (e) {
+    console.error("Chuyển file thất bại, chuyển sang chép + xóa:", e);
+    const newId = await uploadFile(env, toFolder, name, mime, data);
+    try { await trashFile(env, fileId); }
+    catch (x: any) {
+      // Không xóa được bản gốc -> hủy bản vừa chép để lần sau không bị nhân đôi.
+      try { await trashFile(env, newId); } catch { /* bỏ qua */ }
+      throw new Error("Không chuyển/xóa được file ở folder nguồn (kiểm tra quyền chỉnh sửa): " + (x?.message || x));
+    }
+    return newId;
+  }
+}
+
 export async function trashFile(env: Env, fileId: string) {
-  await gfetch(env, `${API}/files/${fileId}?supportsAllDrives=true`, {
+  const r = await gfetch(env, `${API}/files/${fileId}?supportsAllDrives=true`, {
     method: "PATCH",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ trashed: true }),
   });
+  if (!r.ok) throw new Error("Drive từ chối chuyển file vào thùng rác: " + (await r.text()));
 }

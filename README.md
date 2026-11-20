@@ -29,6 +29,7 @@ Tài liệu liên quan:
 **Admin – mục Cấu hình**
 - **Phân quyền user:** chỉ đọc / được ghi / admin; khóa tài khoản; đặt lại mật khẩu về `654321`.
 - **Google Drive:** dán link folder gốc "Văn bản đến" và "Văn bản đi"; app tự tạo 9 thư mục con theo loại.
+- **Upload tự động:** chỉ định 1 folder Drive dùng chung; bỏ hàng loạt văn bản vào đó, app cứ mỗi phút xử lý 1 file (AI trích xuất → chuyển vào `Văn bản đến / <Loại>` → điền thông tin), file xong thì biến mất khỏi folder nguồn. Lỗi hiện ở mục riêng, kèm khâu bị lỗi và nút Thử lại.
 - **Nhật ký:** 200 thao tác gần nhất (upload, sửa, xóa, đổi quyền, AI…).
 - Admin sửa/xóa được **mọi** văn bản và là người duy nhất đổi được **Hướng/Loại** (app tự chuyển file sang thư mục Drive tương ứng).
 
@@ -60,7 +61,10 @@ Yêu cầu công tác · Quyết định · Quy trình · Báo cáo · Thông b�
 quanlyvanban/
 ├─ src/worker/            Worker chính (API + phục vụ file tĩnh)
 │   ├─ index.ts           Toàn bộ route /api/*, middleware, prompt AI
-│   ├─ drive.ts           Gọi Google Drive (token, tạo folder, upload, tải, chuyển, xóa)
+│   ├─ drive.ts           Gọi Google Drive (token, tạo folder, upload, tải, chuyển, xóa, liệt kê)
+│   ├─ ai.ts              Gọi Gemini (prompt, model chính/dự phòng) – dùng chung nút AI và upload tự động
+│   ├─ import.ts          Upload tự động: cron mỗi phút xử lý 1 file từ folder Drive dùng chung
+│   ├─ zip.ts             Đọc chữ trong .docx/.xlsx trên Worker
 │   └─ util.ts            Kiểu Env, hằng LOAI, hash mật khẩu, chuẩn hóa tiếng Việt
 ├─ workers/gemini-proxy/  Worker nhỏ chuyển tiếp tới Gemini (đặt gần máy chủ Google)
 ├─ web/                   Frontend React (index.html, src/App.tsx, Preview.tsx, extract.ts…)
@@ -125,10 +129,12 @@ npm run deploy                             # build + deploy gemini-proxy + Worke
 | `PUT /api/docs/:id`, `DELETE /api/docs/:id` | chủ văn bản / admin | Sửa, xóa |
 | `POST /api/extract` | ghi | Trích xuất bằng AI |
 | `GET/PUT /api/admin/users…`, `POST /api/admin/users/:id/reset-password` | admin | Quản lý user |
-| `GET/PUT /api/admin/settings`, `GET /api/admin/log` | admin | Cấu hình Drive, nhật ký |
+| `GET/PUT /api/admin/settings`, `GET /api/admin/log` | admin | Cấu hình Drive + upload tự động, nhật ký |
+| `GET /api/admin/import/errors`, `POST /api/admin/import/retry` | admin | Lỗi upload tự động, thử lại |
 
 ## 7. Giới hạn đã biết
 
+- Upload tự động: luôn là Văn bản đến, ngày nhận = ngày xử lý; không trích xuất được .doc/.xls/.ppt/.pptx/Google Docs (báo lỗi, file ở nguyên folder nguồn).
 - File tối đa **25 MB**/lần upload (AI đọc tối đa 15 MB); mỗi văn bản **một** file đính kèm.
 - Tìm từ khóa dùng `LIKE` trên cột đã bỏ dấu: ổn với vài chục nghìn văn bản; nếu chậm về sau sẽ chuyển sang FTS5.
 - Chưa có giao diện thêm user mới: thêm vào CSV rồi chạy lại `npm run seed` + `npm run seed:remote` (chỉ thêm user chưa có, không đổi user cũ).

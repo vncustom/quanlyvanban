@@ -1,15 +1,15 @@
 import { Hono, Context } from "hono";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
-import { Env, LOAI, hashPassword, verifyPassword, sha256Hex, norm, extractFolderId } from "./util";
+import { Env, LOAI, MAX_FILE, ALLOWED_EXT, hashPassword, verifyPassword, sha256Hex, norm, extractFolderId } from "./util";
 import { ensureFolder, uploadFile, downloadFile, trashFile, moveFile } from "./drive";
+import { AiError, AiInput, AI_MAX_FILE, aiMimeFor, extractWithAi } from "./ai";
+import { runImportTick } from "./import";
 
 type User = { id: number; username: string; full_name: string; role: "admin" | "write" | "read" };
 type Ctx = Context<{ Bindings: Env; Variables: { user: User } }>;
 
 const app = new Hono<{ Bindings: Env; Variables: { user: User } }>();
 const SESSION_DAYS = 7;
-const MAX_FILE = 25 * 1024 * 1024;
-const ALLOWED_EXT = ["pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "jpg", "jpeg", "png", "txt"];
 
 app.onError((e, c) => {
   console.error(e);
@@ -172,92 +172,28 @@ function validate(f: ReturnType<typeof readFields>) {
 }
 
 // ---------- Trích xuất bằng AI (Gemini) ----------
-const GEMINI_MODEL = "gemini-flash-lite-latest";
-const GEMINI_BACKUP_MODEL = "gemma-4-31b-it"; // dùng khi model chính quá tải
-const EXTRACT_PROMPT = `Bạn là trợ lý đọc văn bản hành chính tiếng Việt. Từ nội dung văn bản được cung cấp, trả về JSON gồm:
-- trich_yeu: trích yếu của văn bản bằng tiếng Việt, tối đa 20 từ. Nếu văn bản có sẵn dòng trích yếu (thường bắt đầu bằng "V/v" hoặc nằm ngay dưới tên loại văn bản) thì rút gọn dòng đó, nếu không thì nêu ngắn gọn văn bản nói về việc gì.
-- tom_tat: tóm tắt nội dung chính bằng tiếng Việt, tối đa 250 từ.
-- loai: loại văn bản, chọn ĐÚNG MỘT giá trị trong danh sách: ${LOAI.join(" | ")}. Căn cứ vào tên loại in ở đầu văn bản (Quyết định, Thông báo, Biên bản, Báo cáo, Công văn...) hoặc nội dung chính. "Lịch phát sóng" dùng cho lịch/chương trình/kế hoạch phát sóng. Nếu văn bản yêu cầu đơn vị/cá nhân thực hiện một công việc cụ thể thì chọn "Yêu cầu công tác". Không khớp loại nào thì chọn "Khác".
-- don_vi_soan_thao: tên cơ quan/đơn vị ban hành văn bản, thường nằm ở góc trên bên trái. Nếu không có thì để chuỗi rỗng.
-- so_van_ban: số/ký hiệu văn bản (ví dụ "12/QĐ-TT"), thường nằm ở góc trên bên trái ngay dưới tên đơn vị. Nếu không có thì để chuỗi rỗng.
-Tuyệt đối không bịa thông tin; không thấy rõ thì để chuỗi rỗng.`;
-
-function toBase64(buf: ArrayBuffer) {
-  const u = new Uint8Array(buf);
-  let s = "";
-  for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode(...u.subarray(i, i + 0x8000));
-  return btoa(s);
-}
-
 app.post("/api/extract", auth, needWrite, async (c) => {
-  if (!c.env.GEMINI_API_KEY) return c.json({ error: "Chưa cấu hình GEMINI_API_KEY trên máy chủ" }, 500);
   const form = await c.req.formData();
   const file = form.get("file");
-  const text = String(form.get("text") ?? "").slice(0, 40000);
-  const parts: any[] = [{ text: EXTRACT_PROMPT }];
+  const text = String(form.get("text") ?? "");
+  let input: AiInput;
   if (file instanceof File && file.size) {
-    if (file.size > 15 * 1024 * 1024) return c.json({ error: "File quá lớn để trích xuất (tối đa 15MB)" }, 400);
+    if (file.size > AI_MAX_FILE) return c.json({ error: "File quá lớn để trích xuất (tối đa 15MB)" }, 400);
     const ext = file.name.split(".").pop()?.toLowerCase() || "";
-    const mime = ext === "pdf" ? "application/pdf" : ext === "png" ? "image/png" : ["jpg", "jpeg"].includes(ext) ? "image/jpeg" : ext === "txt" ? "text/plain" : "";
+    const mime = aiMimeFor(ext);
     if (!mime) return c.json({ error: `Định dạng .${ext} chưa hỗ trợ trích xuất bằng AI` }, 400);
-    parts.push({ inline_data: { mime_type: mime, data: toBase64(await file.arrayBuffer()) } });
-  } else if (text.trim()) {
-    parts.push({ text: "Nội dung văn bản (trích từ file Word/Excel):\n" + text });
-  } else return c.json({ error: "Không có nội dung để trích xuất" }, 400);
+    input = { mime, data: await file.arrayBuffer() };
+  } else if (text.trim()) input = { text };
+  else return c.json({ error: "Không có nội dung để trích xuất" }, 400);
 
-  // Gọi qua Worker proxy đặt gần máy chủ Google (tránh lỗi "User location is not supported"); chạy local thì gọi thẳng.
-  const call = c.env.GEMINI ? (u: string, i: RequestInit) => c.env.GEMINI!.fetch(u, i) : fetch;
-  const callModel = async (model: string) => {
-    const path = `/v1beta/models/${model}:generateContent`;
-    const isGemma = model.startsWith("gemma");
-    // Gemma không hỗ trợ JSON mode/schema của Gemini -> chỉ nhắc trong prompt rồi tự tách JSON ở bên dưới.
-    const reqParts = isGemma ? [{ text: EXTRACT_PROMPT + "\nChỉ trả về đúng một đối tượng JSON thuần (khóa: trich_yeu, tom_tat, loai, don_vi_soan_thao, so_van_ban), không kèm markdown hay giải thích." }, ...parts.slice(1)] : parts;
-    const generationConfig: any = isGemma ? { temperature: 0.2 } : {
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: "OBJECT",
-        properties: {
-          trich_yeu: { type: "STRING" }, tom_tat: { type: "STRING" }, don_vi_soan_thao: { type: "STRING" }, so_van_ban: { type: "STRING" },
-          loai: { type: "STRING", enum: LOAI },
-        },
-        required: ["trich_yeu", "tom_tat", "don_vi_soan_thao", "so_van_ban", "loai"],
-      },
-      temperature: 0.2,
-    };
-    const r = await call(c.env.GEMINI ? `https://gemini-proxy${path}` : `https://generativelanguage.googleapis.com${path}`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-goog-api-key": c.env.GEMINI_API_KEY },
-      body: JSON.stringify({ contents: [{ role: "user", parts: reqParts }], generationConfig }),
-    });
-    const j: any = await r.json().catch(() => ({}));
-    if (!r.ok) return { ok: false as const, status: r.status, msg: String(j?.error?.message || r.status) };
-    const raw: string = (j.candidates?.[0]?.content?.parts ?? []).filter((p: any) => !p.thought).map((p: any) => p.text ?? "").join("");
-    try {
-      const m = raw.match(/\{[\s\S]*\}/);
-      return { ok: true as const, out: JSON.parse(m ? m[0] : raw || "{}") };
-    } catch { return { ok: false as const, status: 502, msg: "AI trả về dữ liệu không đọc được" }; }
-  };
-
-  // Model chính quá tải/lỗi tạm thời -> tự chuyển sang model dự phòng.
-  let res = await callModel(GEMINI_MODEL);
-  const retryable = (x: { status: number; msg: string }) => [429, 500, 502, 503, 504].includes(x.status) || /high demand|overload|unavailable|quota/i.test(x.msg);
-  if (!res.ok && retryable(res)) {
-    console.error("Model chính lỗi, dùng model dự phòng:", res.msg);
-    const backup = await callModel(GEMINI_BACKUP_MODEL);
-    if (backup.ok) res = backup;
-    else res = { ...res, msg: `${res.msg} (model dự phòng ${GEMINI_BACKUP_MODEL} cũng lỗi: ${backup.msg})` };
+  try {
+    const out = await extractWithAi(c.env, input);
+    await audit(c, "ai_extract", null);
+    return c.json(out);
+  } catch (e: any) {
+    if (e instanceof AiError) return c.json({ error: e.message }, e.status as any);
+    throw e;
   }
-  if (!res.ok) return c.json({ error: "Gemini lỗi: " + res.msg }, 502);
-  const out: any = res.out;
-  const cut = (s: unknown, n: number) => String(s ?? "").trim().split(/\s+/).filter(Boolean).slice(0, n).join(" ");
-  await audit(c, "ai_extract", null);
-  return c.json({
-    trich_yeu: cut(out.trich_yeu, 20),
-    tom_tat: cut(out.tom_tat, 250),
-    loai: LOAI.includes(String(out.loai ?? "").trim()) ? String(out.loai).trim() : "",
-    don_vi_soan_thao: String(out.don_vi_soan_thao ?? "").trim(),
-    so_van_ban: String(out.so_van_ban ?? "").trim(),
-  });
 });
 
 app.post("/api/docs", auth, needWrite, async (c) => {
@@ -364,7 +300,45 @@ app.put("/api/admin/settings", auth, needAdmin, async (c) => {
     await c.env.DB.prepare("INSERT OR REPLACE INTO settings(key,value) VALUES (?,?)").bind(k, id).run();
     await c.env.DB.prepare("DELETE FROM drive_folders WHERE huong=?").bind(huong).run();
   }
+  // Upload tự động: bật/tắt, folder nguồn, giãn cách giữa 2 văn bản
+  const put = (k: string, v: string) => c.env.DB.prepare("INSERT OR REPLACE INTO settings(key,value) VALUES (?,?)").bind(k, v).run();
+  if (b.import_folder !== undefined) {
+    const id = b.import_folder ? extractFolderId(b.import_folder) : "";
+    if (b.import_folder && !id) return c.json({ error: "Link/ID folder upload tự động không hợp lệ" }, 400);
+    await put("import_folder", id);
+  }
+  if (b.import_interval !== undefined) {
+    const n = Math.floor(Number(b.import_interval));
+    if (!(n >= 1 && n <= 60)) return c.json({ error: "Khoảng cách giữa 2 văn bản phải từ 1 đến 60 phút" }, 400);
+    await put("import_interval", String(n));
+  }
+  if (b.import_enabled !== undefined) {
+    if (b.import_enabled) {
+      const cur = await c.env.DB.prepare("SELECT key,value FROM settings WHERE key IN ('import_folder','drive_folder_den')").all<{ key: string; value: string }>();
+      const m = Object.fromEntries(cur.results.map((r) => [r.key, r.value]));
+      if (!m.import_folder) return c.json({ error: "Chưa nhập folder Drive nguồn cho upload tự động" }, 400);
+      if (!m.drive_folder_den) return c.json({ error: 'Chưa cấu hình folder gốc "Văn bản đến" ở tab Google Drive' }, 400);
+    }
+    await put("import_enabled", b.import_enabled ? "1" : "0");
+  }
+  if (b.import_folder !== undefined || b.import_enabled !== undefined) await put("import_user_id", String(c.get("user").id)); // văn bản tự động đứng tên admin này
   await audit(c, "settings", null);
+  return c.json({ ok: true });
+});
+
+// Lỗi của upload tự động (mục riêng cho admin)
+app.get("/api/admin/import/errors", auth, needAdmin, async (c) => {
+  const { results } = await c.env.DB.prepare(
+    "SELECT file_id,file_name,stage,message,attempts,created_at,updated_at FROM import_errors ORDER BY updated_at DESC LIMIT 200"
+  ).all();
+  return c.json(results);
+});
+
+// "Thử lại" = xóa dòng lỗi để lượt cron sau nhặt lại file (không truyền file_id: thử lại tất cả)
+app.post("/api/admin/import/retry", auth, needAdmin, async (c) => {
+  const { file_id } = await c.req.json<{ file_id?: string }>().catch(() => ({} as { file_id?: string }));
+  if (file_id) await c.env.DB.prepare("DELETE FROM import_errors WHERE file_id=?").bind(file_id).run();
+  else await c.env.DB.prepare("DELETE FROM import_errors").run();
   return c.json({ ok: true });
 });
 
@@ -377,5 +351,11 @@ app.get("/api/admin/log", auth, needAdmin, async (c) => {
 
 app.all("/api/*", (c) => c.json({ error: "Not found" }, 404));
 
-export default app;
+export default {
+  fetch: app.fetch,
+  // Cron mỗi phút (xem [triggers] trong wrangler.toml): upload tự động từ folder Drive dùng chung
+  scheduled(_event: ScheduledController, env: Env, ctx: ExecutionContext) {
+    ctx.waitUntil(runImportTick(env).catch((e) => console.error("runImportTick:", e)));
+  },
+};
 

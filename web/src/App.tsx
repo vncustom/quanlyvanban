@@ -280,14 +280,14 @@ function Account() {
 }
 
 function Admin({ me }: { me: User }) {
-  const [tab, setTab] = useState<"users" | "drive" | "log">("users");
+  const [tab, setTab] = useState<"users" | "drive" | "import" | "log">("users");
   return (
     <>
       <div className="tabs" style={{ marginBottom: 12 }}>
-        {([["users", "Phân quyền user"], ["drive", "Google Drive"], ["log", "Nhật ký"]] as const).map(([k, l]) =>
+        {([["users", "Phân quyền user"], ["drive", "Google Drive"], ["import", "Upload tự động"], ["log", "Nhật ký"]] as const).map(([k, l]) =>
           <button key={k} className={tab === k ? "on" : ""} onClick={() => setTab(k)}>{l}</button>)}
       </div>
-      {tab === "users" ? <AdminUsers me={me} /> : tab === "drive" ? <AdminDrive /> : <AdminLog />}
+      {tab === "users" ? <AdminUsers me={me} /> : tab === "drive" ? <AdminDrive /> : tab === "import" ? <AdminImport /> : <AdminLog />}
     </>
   );
 }
@@ -343,6 +343,90 @@ function AdminDrive() {
       {err && <p className="err">{err}</p>}{msg && <p className="ok">{msg}</p>}
       <div style={{ height: 12 }} /><button onClick={save}>Lưu</button>
     </div>
+  );
+}
+
+const STAGE: Record<string, string> = {
+  validate: "Kiểm tra file", list: "Đọc folder nguồn", download: "Tải file từ Drive", extract: "Trích xuất bằng AI",
+  folder: "Tạo/tìm thư mục đích", move: "Chuyển file sang thư mục đích", save: "Lưu dữ liệu",
+};
+
+function AdminImport() {
+  const [s, setS] = useState<any>({ import_enabled: "0", import_folder: "", import_interval: "1" });
+  const [errs, setErrs] = useState<any[]>([]), [msg, setMsg] = useState(""), [err, setErr] = useState("");
+  const [folder, setFolder] = useState(""), [interval, setInterval_] = useState("1"), [loaded, setLoaded] = useState(false);
+  const loadErrs = () => api("/admin/import/errors").then(setErrs).catch(() => {});
+  const loadAll = () => api("/admin/settings").then((x) => { setS(x); return x; });
+  useEffect(() => {
+    loadAll().then((x) => { setFolder(x.import_folder || ""); setInterval_(x.import_interval || "1"); setLoaded(true); });
+    loadErrs();
+    const t = window.setInterval(() => { loadAll(); loadErrs(); }, 30000);
+    return () => window.clearInterval(t);
+  }, []);
+  const on = s.import_enabled === "1";
+  const save = async (enabled: boolean) => {
+    setMsg(""); setErr("");
+    try {
+      await api("/admin/settings", { method: "PUT", body: { import_folder: folder, import_interval: Number(interval), import_enabled: enabled } });
+      setMsg(enabled ? "Đã lưu và bật upload tự động." : "Đã lưu cấu hình.");
+      loadAll();
+    } catch (x: any) { setErr(x.message); }
+  };
+  const retry = async (file_id?: string) => { await api("/admin/import/retry", { body: file_id ? { file_id } : {} }); loadErrs(); };
+  const fmt = (iso: string) => (iso ? new Date(iso).toLocaleString("vi-VN") : "—");
+  const fmtDb = (x: string) => new Date(x.replace(" ", "T") + "Z").toLocaleString("vi-VN");
+  const sys = errs.find((e) => e.file_id === "_system");
+  const fileErrs = errs.filter((e) => e.file_id !== "_system");
+
+  return (
+    <>
+      <div className="card" style={{ maxWidth: 720 }}>
+        <p className="muted">
+          Bỏ văn bản vào folder Google Drive dưới đây (chia sẻ quyền chỉnh sửa cho tài khoản Google của app). Mỗi lần chạy app xử lý <b>1 văn bản</b>: AI trích xuất → chuyển file vào
+          “Văn bản đến / &lt;Loại&gt;” → điền thông tin. Xong file không còn trong folder nguồn. Văn bản tự động luôn là <b>Văn bản đến</b>, ngày nhận là ngày xử lý, người upload là admin lưu cấu hình.
+        </p>
+        <label>Folder nguồn (link hoặc ID)</label>
+        <input value={folder} onChange={(e) => setFolder(e.target.value)} placeholder="https://drive.google.com/drive/folders/…" />
+        <div style={{ height: 10 }} />
+        <label>Khoảng cách giữa 2 văn bản (phút, 1–60) — tránh vượt rate limit API</label>
+        <input type="number" min={1} max={60} style={{ maxWidth: 120 }} value={interval} onChange={(e) => setInterval_(e.target.value)} />
+        <p style={{ margin: "12px 0 4px" }}>
+          Trạng thái: <b className={on ? "ok" : "muted"}>{on ? "ĐANG BẬT" : "Đang tắt"}</b>
+          {" · "}Lần chạy gần nhất: {fmt(s.import_last_run)}{s.import_last_msg ? ` — ${s.import_last_msg}` : ""}
+        </p>
+        {err && <p className="err">{err}</p>}{msg && <p className="ok">{msg}</p>}
+        <div className="row" style={{ marginTop: 8 }}>
+          {!on && <button disabled={!loaded} onClick={() => save(true)}>Lưu và bật</button>}
+          {on && <button disabled={!loaded} onClick={() => save(true)}>Lưu cấu hình</button>}
+          {on && <button className="ghost" onClick={() => save(false)}>Tắt</button>}
+        </div>
+      </div>
+
+      <div className="card" style={{ padding: 0, overflowX: "auto" }}>
+        <div style={{ padding: 12 }} className="row">
+          <b>Lỗi upload tự động ({fileErrs.length})</b>
+          {fileErrs.length > 0 && <button className="ghost" onClick={() => retry()}>Thử lại tất cả</button>}
+        </div>
+        {sys && <p className="err" style={{ padding: "0 12px" }}>Lỗi hệ thống — khâu “{STAGE[sys.stage] || sys.stage}”: {sys.message} <span className="muted">({fmtDb(sys.updated_at)})</span></p>}
+        <table>
+          <thead><tr><th>File</th><th>Khâu lỗi</th><th>Chi tiết</th><th>Lần thử</th><th>Lúc</th><th></th></tr></thead>
+          <tbody>
+            {fileErrs.map((e) => (
+              <tr key={e.file_id}>
+                <td><a href={`https://drive.google.com/file/d/${e.file_id}/view`} target="_blank" rel="noreferrer">{e.file_name}</a></td>
+                <td>{STAGE[e.stage] || e.stage}</td>
+                <td>{e.message}</td>
+                <td>{e.attempts >= 2 ? "Đã dừng" : `${e.attempts}/2`}</td>
+                <td>{fmtDb(e.updated_at)}</td>
+                <td><button className="ghost" onClick={() => retry(e.file_id)}>Thử lại</button></td>
+              </tr>
+            ))}
+            {!fileErrs.length && <tr><td colSpan={6} className="muted">Không có lỗi.</td></tr>}
+          </tbody>
+        </table>
+        <p className="muted" style={{ padding: "0 12px 12px" }}>File lỗi vẫn nằm nguyên trong folder nguồn. Sau mỗi lần lỗi app nghỉ 15 phút rồi tự thử lại 1 lần; thất bại lần thứ 2 thì ngừng; sửa nguyên nhân (hoặc thay file) rồi bấm “Thử lại”.</p>
+      </div>
+    </>
   );
 }
 

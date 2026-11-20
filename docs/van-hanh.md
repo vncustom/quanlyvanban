@@ -230,6 +230,16 @@ Thêm loại mới: không ảnh hưởng gì dữ liệu cũ; thư mục Drive 
 5. Người dùng thấy giao diện cũ thì bảo họ Ctrl+F5.
 6. Có sự cố sau cập nhật: `npx wrangler rollback` về bản Worker trước (lưu ý: **không** hoàn tác migration D1).
 
+## 8.1 Upload tự động từ folder Drive dùng chung
+
+1. Tạo 1 folder trên Drive, **chia sẻ quyền Chỉnh sửa (Editor)** cho tài khoản Google đã cấp `GOOGLE_REFRESH_TOKEN` (cần quyền sửa để app chuyển file đi).
+2. Chạy migration: `npm run db:migrate:remote` (tạo bảng `import_errors` và các khóa `import_*`), rồi `npm run deploy` (lần deploy này đăng ký cron `* * * * *` trong `wrangler.toml`).
+3. Vào **Cấu hình → Google Drive** đảm bảo đã có folder gốc "Văn bản đến". Sang tab **Upload tự động**: dán link folder nguồn, chọn khoảng cách giữa 2 văn bản (mặc định 1 phút), bấm **Lưu và bật**.
+4. Bỏ văn bản vào folder nguồn. Mỗi lượt cron xử lý 1 file; xong file biến mất khỏi folder nguồn và xuất hiện trong danh sách văn bản (người upload là admin đã lưu cấu hình, chưa đánh dấu đã đọc).
+5. File lỗi ở nguyên folder nguồn và hiện trong mục **Lỗi upload tự động** (khâu lỗi + chi tiết). Mỗi file chỉ được xử lý tối đa 2 lần, nghỉ 15 phút giữa hai lần (các file khác vẫn được xử lý); sau đó sửa nguyên nhân rồi bấm **Thử lại**. Muốn tạm dừng: bấm **Tắt**.
+
+Lưu ý: cron chạy theo giờ Cloudflare nên có thể lệch vài giây; thời gian xử lý mỗi file (tải + AI) thường 5–30 giây. Chạy thử local: `npx wrangler dev --test-scheduled` rồi gọi `http://127.0.0.1:8787/cdn-cgi/handler/scheduled`. Gói Workers Free giới hạn CPU rất thấp mỗi lượt; nếu log báo "Exceeded CPU limit" với file lớn, nâng lên Workers Paid.
+
 ## 9. Xử lý sự cố thường gặp
 
 | Hiện tượng | Nguyên nhân / cách xử lý |

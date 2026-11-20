@@ -9,6 +9,8 @@ export type Env = {
 };
 
 export const LOAI = ["Yêu cầu công tác", "Quyết định", "Quy trình", "Báo cáo", "Thông báo", "Biên bản", "Quy chế", "Công văn", "Lịch phát sóng", "Khác"];
+export const MAX_FILE = 25 * 1024 * 1024;
+export const ALLOWED_EXT = ["pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "jpg", "jpeg", "png", "txt"];
 export const HUONG_LABEL: Record<string, string> = { den: "Văn bản đến", di: "Văn bản đi" };
 
 const ITER = 50000; // khớp scripts/gen-seed.mjs
