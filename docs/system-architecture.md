@@ -81,6 +81,7 @@ settings (key/value)          drive_folders (huong, loai → folder_id)
 | `sessions` | `id` (= SHA-256 của token), `user_id`, `expires_at` (ms) | Token thô chỉ có trong cookie, DB chỉ lưu băm |
 | `documents` | `id` INTEGER PRIMARY KEY AUTOINCREMENT, `so_van_ban`, `don_vi_soan_thao`, `huong` (`den`/`di`), `loai`, `trich_yeu`, `tom_tat`, `drive_file_id`, `ten_file`, `mime`, `size`, `ngay_nhan` (YYYY-MM-DD), `ghi_chu`, `search_text`, `created_by`, `created_at`, `updated_at` | `id` tăng dần, không tái sử dụng sau khi xóa; `so_van_ban` **không** unique; `search_text` là chuỗi đã bỏ dấu + hạ chữ thường để tìm kiếm |
 | `settings` | `drive_folder_den`, `drive_folder_di` | ID folder gốc trên Drive |
+| `doc_reads` | PK (`user_id`, `doc_id`), `read_at` | Trạng thái "đã đọc" theo từng user; mở chi tiết văn bản = ghi nhận đã đọc, người upload tự động coi là đã đọc (migration `0002_doc_reads.sql`) |
 | `drive_folders` | PK (`huong`, `loai`) → `folder_id` | Cache ID thư mục con để khỏi hỏi Drive mỗi lần upload; xóa khi admin đổi folder gốc |
 | `audit_log` | `user_id`, `action`, `doc_id`, `detail`, `created_at` | Giờ UTC |
 

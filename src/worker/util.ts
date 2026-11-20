@@ -8,7 +8,7 @@ export type Env = {
   GEMINI?: Fetcher; // service binding tới workers/gemini-proxy
 };
 
-export const LOAI = ["Yêu cầu công tác", "Quyết định", "Quy trình", "Báo cáo", "Thông báo", "Biên bản", "Quy chế", "Công văn", "Khác"];
+export const LOAI = ["Yêu cầu công tác", "Quyết định", "Quy trình", "Báo cáo", "Thông báo", "Biên bản", "Quy chế", "Công văn", "Lịch phát sóng", "Khác"];
 export const HUONG_LABEL: Record<string, string> = { den: "Văn bản đến", di: "Văn bản đi" };
 
 const ITER = 50000; // khớp scripts/gen-seed.mjs

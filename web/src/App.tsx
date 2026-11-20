@@ -68,7 +68,7 @@ function Login({ onOk }: { onOk: (u: User) => void }) {
 }
 
 function DocList() {
-  const [f, setF] = useState({ huong: "", loai: "", q: "", so: "", don_vi: "", from: "", to: "" });
+  const [f, setF] = useState({ huong: "", loai: "", q: "", so: "", don_vi: "", from: "", to: "", read: "" });
   const [page, setPage] = useState(1);
   const [data, setData] = useState<{ total: number; items: Doc[]; size: number } | null>(null);
   const [donVi, setDonVi] = useState<string[]>([]);
@@ -100,6 +100,8 @@ function DocList() {
         <div className="grid">
           <div><label>Từ khóa (trích yếu, tóm tắt…)</label><input value={f.q} onChange={(e) => set("q", e.target.value)} placeholder="Gõ có hoặc không dấu" /></div>
           <div><label>Số văn bản</label><input value={f.so} onChange={(e) => set("so", e.target.value)} /></div>
+          <div><label>Trạng thái đọc</label>
+            <select value={f.read} onChange={(e) => set("read", e.target.value)}><option value="">Tất cả</option><option value="unread">Chưa đọc</option><option value="read">Đã đọc</option></select></div>
           <div><label>Đơn vị soạn thảo</label>
             <select value={f.don_vi} onChange={(e) => set("don_vi", e.target.value)}><option value="">Tất cả</option>{donVi.map((l) => <option key={l}>{l}</option>)}</select></div>
           <div><label>Từ ngày</label><input type="date" value={f.from} onChange={(e) => set("from", e.target.value)} /></div>
@@ -112,10 +114,11 @@ function DocList() {
           <thead><tr><th>ID</th><th>Số VB</th><th>Ngày nhận</th><th>Loại</th><th>Trích yếu</th><th className="hide-m">Đơn vị soạn thảo</th></tr></thead>
           <tbody>
             {data?.items.map((d) => (
-              <tr key={d.id} className="click" onClick={() => go("#/doc/" + d.id)}>
+              <tr key={d.id} className={"click" + (d.is_read ? " read" : " unread")} onClick={() => go("#/doc/" + d.id)}>
                 <td>{d.id}</td><td>{d.so_van_ban}</td><td>{fmtDate(d.ngay_nhan)}</td>
                 <td><span className="tag">{huongLabel(d.huong)}</span> {d.loai}</td>
-                <td>{d.trich_yeu}</td><td className="hide-m">{d.don_vi_soan_thao}</td>
+                <td>{!d.is_read && <span className="dot" title="Chưa đọc" />}{d.trich_yeu}{d.is_read ? <span className="tag tag-read" title="Bạn đã đọc văn bản này">✓ Đã đọc</span> : null}</td>
+                <td className="hide-m">{d.don_vi_soan_thao}</td>
               </tr>
             ))}
             {data && !data.items.length && <tr><td colSpan={6} className="muted">Không có văn bản phù hợp.</td></tr>}
@@ -143,6 +146,12 @@ function DocView({ id, user }: { id: string; user: User }) {
     await api("/docs/" + id, { method: "DELETE" }); go("#/");
   };
   const row = (l: string, v: string) => <p style={{ margin: "4px 0" }}><span className="muted">{l}: </span>{v || "—"}</p>;
+  const markUnread = async () => { await api(`/docs/${id}/read`, { method: "DELETE" }); go("#/"); };
+  const fmtTime = (s: string | null | undefined) => {
+    if (!s) return "";
+    const t = new Date(s.replace(" ", "T") + "Z");
+    return isNaN(t.getTime()) ? s : t.toLocaleString("vi-VN");
+  };
 
   return (
     <>
@@ -151,12 +160,14 @@ function DocView({ id, user }: { id: string; user: User }) {
         {edit ? <DocForm doc={d} isAdmin={user.role === "admin"} onDone={() => { setEdit(false); load(); }} /> : (
           <>
             <h2 style={{ marginTop: 0 }}>{d.trich_yeu}</h2>
+            <p className="ok" style={{ margin: "0 0 8px" }}>✓ Đã đọc{d.read_at ? ` · ${fmtTime(d.read_at)}` : ""}</p>
             {row("ID", String(d.id))}{row("Số văn bản", d.so_van_ban)}
             {row("Hướng / Loại", `${huongLabel(d.huong)} / ${d.loai}`)}
             {row("Đơn vị soạn thảo", d.don_vi_soan_thao)}{row("Ngày nhận", fmtDate(d.ngay_nhan))}
             {row("Tóm tắt nội dung", d.tom_tat)}{row("Ghi chú", d.ghi_chu)}{row("Người upload", d.nguoi_tao)}
             <div className="row" style={{ marginTop: 12 }}>
               <a className="btn" href={`/api/docs/${d.id}/file?download=1`}>⬇ Tải {d.ten_file}</a>
+              <button className="ghost" onClick={markUnread}>Đánh dấu chưa đọc</button>
               {canEdit && <button className="ghost" onClick={() => setEdit(true)}>Sửa</button>}
               {canEdit && <button className="danger" onClick={del}>Xóa</button>}
             </div>
@@ -197,8 +208,9 @@ function DocForm({ doc, isAdmin, onDone }: { doc?: Doc; isAdmin?: boolean; onDon
         tom_tat: r.tom_tat || p.tom_tat,
         so_van_ban: r.so_van_ban || p.so_van_ban,
         don_vi_soan_thao: r.don_vi_soan_thao || p.don_vi_soan_thao,
+        loai: LOAI.includes(r.loai) ? r.loai : p.loai,
       }));
-      setAiMsg("✓ Đã điền thông tin, vui lòng kiểm tra lại.");
+      setAiMsg(`✓ Đã điền thông tin${LOAI.includes(r.loai) ? ` (loại văn bản: ${r.loai})` : ""}, vui lòng kiểm tra lại.`);
     } catch (x: any) { setAiMsg(x.message); }
     setAi(false);
   };
@@ -231,13 +243,13 @@ function DocForm({ doc, isAdmin, onDone }: { doc?: Doc; isAdmin?: boolean; onDon
         <div><label>Ngày nhận *</label><input type="date" value={v.ngay_nhan} onChange={(e) => set("ngay_nhan", e.target.value)} required /></div>
       </div>
       <div style={{ height: 10 }} /><label>Trích yếu *</label><input value={v.trich_yeu} onChange={(e) => set("trich_yeu", e.target.value)} required />
-      <div style={{ height: 10 }} /><label>Tóm tắt nội dung</label><textarea rows={4} value={v.tom_tat} onChange={(e) => set("tom_tat", e.target.value)} />
+      <div style={{ height: 10 }} /><label>Tóm tắt nội dung</label><textarea rows={8} value={v.tom_tat} onChange={(e) => set("tom_tat", e.target.value)} />
       <div style={{ height: 10 }} /><label>Ghi chú</label><input value={v.ghi_chu} onChange={(e) => set("ghi_chu", e.target.value)} />
       {!doc && <><div style={{ height: 10 }} /><label>File đính kèm * (PDF, Word, Excel, ảnh… tối đa 25MB)</label>
         <input type="file" onChange={(e) => { setFile(e.target.files?.[0] ?? null); setAiMsg(""); }} />
         <div className="row" style={{ marginTop: 8 }}>
           <button type="button" className="ghost" disabled={!file || ai} onClick={extractAi}>{ai ? "AI đang đọc văn bản…" : "✨ Trích xuất bằng AI"}</button>
-          <span className="muted">Điền tự động Trích yếu, Tóm tắt, Số văn bản, Đơn vị soạn thảo. Bạn nên kiểm tra lại trước khi lưu.</span>
+          <span className="muted">Điền tự động Loại văn bản, Trích yếu, Tóm tắt (tối đa 250 từ), Số văn bản, Đơn vị soạn thảo. Bạn nên kiểm tra lại trước khi lưu.</span>
         </div>
         {aiMsg && <p className={aiMsg.startsWith("✓") ? "ok" : "err"}>{aiMsg}</p>}</>}
       {err && <p className="err">{err}</p>}

@@ -86,9 +86,14 @@ app.get("/api/meta", auth, async (c) => {
 // ---------- Văn bản ----------
 const COLS = "d.id,d.so_van_ban,d.don_vi_soan_thao,d.huong,d.loai,d.trich_yeu,d.tom_tat,d.ten_file,d.mime,d.size,d.ngay_nhan,d.ghi_chu,d.created_by,d.created_at,u.full_name AS nguoi_tao";
 
+const READ_SQL = "EXISTS(SELECT 1 FROM doc_reads r WHERE r.doc_id=d.id AND r.user_id=?)";
+
 app.get("/api/docs", auth, async (c) => {
   const q = c.req.query();
+  const uid = c.get("user").id;
   const where: string[] = [], args: any[] = [];
+  if (q.read === "unread") { where.push(`NOT ${READ_SQL}`); args.push(uid); }
+  else if (q.read === "read") { where.push(READ_SQL); args.push(uid); }
   if (q.huong === "den" || q.huong === "di") { where.push("d.huong=?"); args.push(q.huong); }
   if (q.loai) { where.push("d.loai=?"); args.push(q.loai); }
   if (q.don_vi) { where.push("d.don_vi_soan_thao=?"); args.push(q.don_vi); }
@@ -101,14 +106,34 @@ app.get("/api/docs", auth, async (c) => {
   const page = Math.max(Number(q.page) || 1, 1);
   const total = (await c.env.DB.prepare(`SELECT COUNT(*) n FROM documents d ${w}`).bind(...args).first<{ n: number }>())!.n;
   const { results } = await c.env.DB.prepare(
-    `SELECT ${COLS} FROM documents d JOIN users u ON u.id=d.created_by ${w} ORDER BY d.ngay_nhan DESC, d.id DESC LIMIT ? OFFSET ?`
-  ).bind(...args, size, (page - 1) * size).all();
+    `SELECT ${COLS},${READ_SQL} AS is_read FROM documents d JOIN users u ON u.id=d.created_by ${w} ORDER BY d.ngay_nhan DESC, d.id DESC LIMIT ? OFFSET ?`
+  ).bind(uid, ...args, size, (page - 1) * size).all();
   return c.json({ total, page, size, items: results });
 });
 
+// Mở chi tiết văn bản = đã đọc (ghi nhận lần đọc đầu tiên của user này)
 app.get("/api/docs/:id", auth, async (c) => {
-  const d = await c.env.DB.prepare(`SELECT ${COLS} FROM documents d JOIN users u ON u.id=d.created_by WHERE d.id=?`).bind(c.req.param("id")).first();
-  return d ? c.json(d) : c.json({ error: "Không tìm thấy" }, 404);
+  const d = await c.env.DB.prepare(`SELECT ${COLS} FROM documents d JOIN users u ON u.id=d.created_by WHERE d.id=?`).bind(c.req.param("id")).first<any>();
+  if (!d) return c.json({ error: "Không tìm thấy" }, 404);
+  const r = await c.env.DB.prepare("SELECT read_at FROM doc_reads WHERE user_id=? AND doc_id=?").bind(c.get("user").id, d.id).first<{ read_at: string }>();
+  let readAt = r?.read_at ?? null;
+  if (!r) {
+    await c.env.DB.prepare("INSERT OR IGNORE INTO doc_reads(user_id,doc_id) VALUES (?,?)").bind(c.get("user").id, d.id).run();
+    readAt = new Date().toISOString().slice(0, 19).replace("T", " ");
+  }
+  return c.json({ ...d, is_read: 1, read_at: readAt });
+});
+
+// Đánh dấu lại là chưa đọc / đã đọc
+app.delete("/api/docs/:id/read", auth, async (c) => {
+  await c.env.DB.prepare("DELETE FROM doc_reads WHERE user_id=? AND doc_id=?").bind(c.get("user").id, c.req.param("id")).run();
+  return c.json({ ok: true });
+});
+app.put("/api/docs/:id/read", auth, async (c) => {
+  const exists = await c.env.DB.prepare("SELECT 1 x FROM documents WHERE id=?").bind(c.req.param("id")).first();
+  if (!exists) return c.json({ error: "Không tìm thấy" }, 404);
+  await c.env.DB.prepare("INSERT OR IGNORE INTO doc_reads(user_id,doc_id) VALUES (?,?)").bind(c.get("user").id, c.req.param("id")).run();
+  return c.json({ ok: true });
 });
 
 app.get("/api/docs/:id/file", auth, async (c) => {
@@ -148,9 +173,11 @@ function validate(f: ReturnType<typeof readFields>) {
 
 // ---------- Trích xuất bằng AI (Gemini) ----------
 const GEMINI_MODEL = "gemini-flash-lite-latest";
+const GEMINI_BACKUP_MODEL = "gemma-4-31b-it"; // dùng khi model chính quá tải
 const EXTRACT_PROMPT = `Bạn là trợ lý đọc văn bản hành chính tiếng Việt. Từ nội dung văn bản được cung cấp, trả về JSON gồm:
 - trich_yeu: trích yếu của văn bản bằng tiếng Việt, tối đa 20 từ. Nếu văn bản có sẵn dòng trích yếu (thường bắt đầu bằng "V/v" hoặc nằm ngay dưới tên loại văn bản) thì rút gọn dòng đó, nếu không thì nêu ngắn gọn văn bản nói về việc gì.
-- tom_tat: tóm tắt nội dung chính bằng tiếng Việt, tối đa 100 từ.
+- tom_tat: tóm tắt nội dung chính bằng tiếng Việt, tối đa 250 từ.
+- loai: loại văn bản, chọn ĐÚNG MỘT giá trị trong danh sách: ${LOAI.join(" | ")}. Căn cứ vào tên loại in ở đầu văn bản (Quyết định, Thông báo, Biên bản, Báo cáo, Công văn...) hoặc nội dung chính. "Lịch phát sóng" dùng cho lịch/chương trình/kế hoạch phát sóng. Nếu văn bản yêu cầu đơn vị/cá nhân thực hiện một công việc cụ thể thì chọn "Yêu cầu công tác". Không khớp loại nào thì chọn "Khác".
 - don_vi_soan_thao: tên cơ quan/đơn vị ban hành văn bản, thường nằm ở góc trên bên trái. Nếu không có thì để chuỗi rỗng.
 - so_van_ban: số/ký hiệu văn bản (ví dụ "12/QĐ-TT"), thường nằm ở góc trên bên trái ngay dưới tên đơn vị. Nếu không có thì để chuỗi rỗng.
 Tuyệt đối không bịa thông tin; không thấy rõ thì để chuỗi rỗng.`;
@@ -179,33 +206,55 @@ app.post("/api/extract", auth, needWrite, async (c) => {
   } else return c.json({ error: "Không có nội dung để trích xuất" }, 400);
 
   // Gọi qua Worker proxy đặt gần máy chủ Google (tránh lỗi "User location is not supported"); chạy local thì gọi thẳng.
-  const path = `/v1beta/models/${GEMINI_MODEL}:generateContent`;
   const call = c.env.GEMINI ? (u: string, i: RequestInit) => c.env.GEMINI!.fetch(u, i) : fetch;
-  const r = await call(c.env.GEMINI ? `https://gemini-proxy${path}` : `https://generativelanguage.googleapis.com${path}`, {
-    method: "POST",
-    headers: { "content-type": "application/json", "x-goog-api-key": c.env.GEMINI_API_KEY },
-    body: JSON.stringify({
-      contents: [{ role: "user", parts }],
-      generationConfig: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: "OBJECT",
-          properties: { trich_yeu: { type: "STRING" }, tom_tat: { type: "STRING" }, don_vi_soan_thao: { type: "STRING" }, so_van_ban: { type: "STRING" } },
-          required: ["trich_yeu", "tom_tat", "don_vi_soan_thao", "so_van_ban"],
+  const callModel = async (model: string) => {
+    const path = `/v1beta/models/${model}:generateContent`;
+    const isGemma = model.startsWith("gemma");
+    // Gemma không hỗ trợ JSON mode/schema của Gemini -> chỉ nhắc trong prompt rồi tự tách JSON ở bên dưới.
+    const reqParts = isGemma ? [{ text: EXTRACT_PROMPT + "\nChỉ trả về đúng một đối tượng JSON thuần (khóa: trich_yeu, tom_tat, loai, don_vi_soan_thao, so_van_ban), không kèm markdown hay giải thích." }, ...parts.slice(1)] : parts;
+    const generationConfig: any = isGemma ? { temperature: 0.2 } : {
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: "OBJECT",
+        properties: {
+          trich_yeu: { type: "STRING" }, tom_tat: { type: "STRING" }, don_vi_soan_thao: { type: "STRING" }, so_van_ban: { type: "STRING" },
+          loai: { type: "STRING", enum: LOAI },
         },
-        temperature: 0.2,
+        required: ["trich_yeu", "tom_tat", "don_vi_soan_thao", "so_van_ban", "loai"],
       },
-    }),
-  });
-  const j: any = await r.json().catch(() => ({}));
-  if (!r.ok) return c.json({ error: "Gemini lỗi: " + (j?.error?.message || r.status) }, 502);
-  let out: any = {};
-  try { out = JSON.parse(j.candidates?.[0]?.content?.parts?.map((p: any) => p.text).join("") || "{}"); } catch { return c.json({ error: "AI trả về dữ liệu không đọc được, thử lại" }, 502); }
+      temperature: 0.2,
+    };
+    const r = await call(c.env.GEMINI ? `https://gemini-proxy${path}` : `https://generativelanguage.googleapis.com${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-goog-api-key": c.env.GEMINI_API_KEY },
+      body: JSON.stringify({ contents: [{ role: "user", parts: reqParts }], generationConfig }),
+    });
+    const j: any = await r.json().catch(() => ({}));
+    if (!r.ok) return { ok: false as const, status: r.status, msg: String(j?.error?.message || r.status) };
+    const raw: string = (j.candidates?.[0]?.content?.parts ?? []).filter((p: any) => !p.thought).map((p: any) => p.text ?? "").join("");
+    try {
+      const m = raw.match(/\{[\s\S]*\}/);
+      return { ok: true as const, out: JSON.parse(m ? m[0] : raw || "{}") };
+    } catch { return { ok: false as const, status: 502, msg: "AI trả về dữ liệu không đọc được" }; }
+  };
+
+  // Model chính quá tải/lỗi tạm thời -> tự chuyển sang model dự phòng.
+  let res = await callModel(GEMINI_MODEL);
+  const retryable = (x: { status: number; msg: string }) => [429, 500, 502, 503, 504].includes(x.status) || /high demand|overload|unavailable|quota/i.test(x.msg);
+  if (!res.ok && retryable(res)) {
+    console.error("Model chính lỗi, dùng model dự phòng:", res.msg);
+    const backup = await callModel(GEMINI_BACKUP_MODEL);
+    if (backup.ok) res = backup;
+    else res = { ...res, msg: `${res.msg} (model dự phòng ${GEMINI_BACKUP_MODEL} cũng lỗi: ${backup.msg})` };
+  }
+  if (!res.ok) return c.json({ error: "Gemini lỗi: " + res.msg }, 502);
+  const out: any = res.out;
   const cut = (s: unknown, n: number) => String(s ?? "").trim().split(/\s+/).filter(Boolean).slice(0, n).join(" ");
   await audit(c, "ai_extract", null);
   return c.json({
     trich_yeu: cut(out.trich_yeu, 20),
-    tom_tat: cut(out.tom_tat, 100),
+    tom_tat: cut(out.tom_tat, 250),
+    loai: LOAI.includes(String(out.loai ?? "").trim()) ? String(out.loai).trim() : "",
     don_vi_soan_thao: String(out.don_vi_soan_thao ?? "").trim(),
     so_van_ban: String(out.so_van_ban ?? "").trim(),
   });
@@ -231,6 +280,7 @@ app.post("/api/docs", auth, needWrite, async (c) => {
   ).bind(f.so_van_ban, f.don_vi_soan_thao, f.huong, f.loai, f.trich_yeu, f.tom_tat, driveId, file.name, mime, file.size,
     f.ngay_nhan, f.ghi_chu, buildSearch(f), c.get("user").id).run();
   const id = r.meta.last_row_id as number;
+  await c.env.DB.prepare("INSERT OR IGNORE INTO doc_reads(user_id,doc_id) VALUES (?,?)").bind(c.get("user").id, id).run(); // người upload coi như đã đọc
   await audit(c, "create", id, f.so_van_ban);
   return c.json({ id }, 201);
 });
@@ -265,6 +315,7 @@ app.put("/api/docs/:id", auth, async (c) => {
 app.delete("/api/docs/:id", auth, async (c) => {
   const { err, d } = await canEdit(c, c.req.param("id")!);
   if (err) return err;
+  await c.env.DB.prepare("DELETE FROM doc_reads WHERE doc_id=?").bind(c.req.param("id")).run();
   await c.env.DB.prepare("DELETE FROM documents WHERE id=?").bind(c.req.param("id")).run();
   try { await trashFile(c.env, d.drive_file_id); } catch (e) { console.error(e); }
   await audit(c, "delete", Number(c.req.param("id")));

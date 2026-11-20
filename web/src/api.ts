@@ -1,8 +1,10 @@
-export const LOAI = ["Yêu cầu công tác", "Quyết định", "Quy trình", "Báo cáo", "Thông báo", "Biên bản", "Quy chế", "Công văn", "Khác"];
+export const LOAI = ["Yêu cầu công tác", "Quyết định", "Quy trình", "Báo cáo", "Thông báo", "Biên bản", "Quy chế", "Công văn", "Lịch phát sóng", "Khác"];
 export type User = { id: number; username: string; full_name: string; role: "admin" | "write" | "read" };
 export type Doc = {
   id: number; so_van_ban: string; don_vi_soan_thao: string; huong: "den" | "di"; loai: string; trich_yeu: string;
   tom_tat: string; ten_file: string; mime: string; size: number; ngay_nhan: string; ghi_chu: string; created_by: number; nguoi_tao: string;
+  read_at?: string | null; // thời điểm user đọc lần đầu (chỉ có ở chi tiết)
+  is_read?: number; // 1 nếu user hiện tại đã đọc văn bản này
 };
 
 export async function api<T = any>(path: string, opts: { method?: string; body?: any } = {}): Promise<T> {
